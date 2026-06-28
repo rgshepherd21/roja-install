@@ -196,7 +196,7 @@ agent:
   name: "${NAME}"
   install_token: "${TOKEN}"
   data_dir: "${DATA_DIR}"
-  heartbeat: 30s
+  heartbeat: 5s
 
 vault:
   backend: sqlite

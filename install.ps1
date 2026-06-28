@@ -127,7 +127,7 @@ agent:
   name: "$Name"
   install_token: "$Token"
   data_dir: "$($DataDir -replace '\\', '\\\\')"
-  heartbeat: 30s
+  heartbeat: 5s
 
 vault:
   backend: sqlite
