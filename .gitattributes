@@ -1,0 +1,4 @@
+# Enforce LF repo-wide. The install scripts are served verbatim via GitHub
+# Pages (install.getroja.ai); a CRLF install.sh breaks `curl … | bash` on
+# Linux/macOS (`bash: \r: command not found`). Mirrors aione-agent's policy.
+* text=auto eol=lf
