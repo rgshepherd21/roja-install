@@ -1,0 +1,51 @@
+name: Pages
+
+# Publishes install.sh + install.ps1 as a static site at install.getroja.ai.
+# This is the URL the (private) backend install-token mint endpoint hands to
+# users in the install_commands one-liner. These two scripts are non-sensitive
+# and intentionally public; the agent SOURCE/IP lives in the private
+# rgshepherd21/aione-agent repo and is mirrored here on release.
+#
+# Triggers: push to main touching the scripts/workflow, or manual dispatch.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'install.sh'
+      - 'install.ps1'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    name: Deploy install scripts to GitHub Pages
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare site directory
+        run: |
+          mkdir -p _site
+          cp install.sh _site/install.sh
+          cp install.ps1 _site/install.ps1
+          echo "install.getroja.ai" > _site/CNAME
+          cp index.html _site/index.html
+          ls -la _site/
+      - uses: actions/configure-pages@v4
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site/
+      - id: deployment
+        uses: actions/deploy-pages@v4
