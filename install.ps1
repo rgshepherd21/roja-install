@@ -56,7 +56,7 @@ if (-not $Backend.StartsWith("https://")) {
 }
 
 $ErrorActionPreference = "Stop"
-$Repo = "rgshepherd21/aione-agent"
+$Repo = "rgshepherd21/roja-install"   # public distribution repo (binaries mirrored on release)
 
 # --- arch detection --------------------------------------------------------
 $Arch = switch ($env:PROCESSOR_ARCHITECTURE) {

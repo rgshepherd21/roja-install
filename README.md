@@ -14,3 +14,11 @@ surface from the IP.
 `aione-agent`, copy them here and push to `main` — the Pages workflow redeploys.
 
 Source of truth for the scripts: `aione-agent/install/` (private).
+
+## Binary releases
+
+As of 2026-07-01 the agent **release binaries are mirrored to this repo's
+GitHub Releases** by aione-agent's release workflow (the source repo is
+private, so its assets are not anonymously downloadable). The install
+scripts resolve versions and download from `rgshepherd21/roja-install`
+releases. Source of truth for build + mirror: `aione-agent/.github/workflows/release.yml`.

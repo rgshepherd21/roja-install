@@ -49,7 +49,7 @@ VERSION=""
 BACKEND="https://agents.getroja.ai"
 NAME="$(hostname)"
 NO_START=false
-REPO="rgshepherd21/aione-agent"
+REPO="rgshepherd21/roja-install"   # public distribution repo (binaries mirrored on release)
 
 # --- arg parsing ------------------------------------------------------------
 while [ $# -gt 0 ]; do
