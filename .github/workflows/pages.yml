@@ -14,6 +14,7 @@ on:
     paths:
       - 'install.sh'
       - 'install.ps1'
+      - 'index.html'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
