@@ -184,7 +184,11 @@ fi
 mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$DATA_DIR"
 mv "${TMPDIR}/agent" "${INSTALL_DIR}/aione-agent"
 chmod 755 "${INSTALL_DIR}/aione-agent"
-chmod 755 "$DATA_DIR"
+# DATA_DIR holds the agent's mTLS private key and the encrypted credential
+# vault — owner-only (CR-8). The service runs as root (the systemd unit has
+# no User= — kardianos default — and launchd daemons run as root), so 700
+# root:root stays readable by the agent while shutting out local users.
+chmod 700 "$DATA_DIR"
 
 # Write config. install_token is baked in literally because kardianos/service
 # doesn't propagate install-time env vars into the systemd unit's Environment=
@@ -214,7 +218,10 @@ log:
   level: info
   pretty: false
 EOF
-chmod 644 "${CONFIG_DIR}/agent.yaml"
+# agent.yaml carries the install token until first registration clears it —
+# owner-only (CR-8). Same service-user reasoning as DATA_DIR above: the
+# agent runs as root, so 600 root:root is sufficient.
+chmod 600 "${CONFIG_DIR}/agent.yaml"
 
 # --- register as a system service ------------------------------------------
 echo ">>> Installing system service"
@@ -235,7 +242,18 @@ if [ "$NO_START" = false ]; then
             echo "WARN: service did not reach active state; check journalctl -u aione-agent" >&2
         fi
     else
-        echo "    (macOS: launchd unit installed; start with launchctl if needed)"
+        # '-service install' above wrote /Library/LaunchDaemons/
+        # aione-agent.plist (kardianos); '-service start' launchctl-loads
+        # it. Before CR-8 this branch only printed a hint, so macOS
+        # installs never actually started heartbeating despite the
+        # closing message promising it.
+        "${INSTALL_DIR}/aione-agent" -service start -config "${CONFIG_DIR}/agent.yaml"
+        sleep 2
+        if launchctl list 2>/dev/null | grep -q aione-agent; then
+            echo "    ✓ service started"
+        else
+            echo "WARN: service did not start; check: sudo launchctl list | grep aione-agent" >&2
+        fi
     fi
 fi
 
@@ -250,6 +268,8 @@ EOF
 
 if [ "$NO_START" = false ]; then
     echo "Check the Roja chat UI — the new host should appear within 30 s."
-else
+elif [ "$OS" = "linux" ]; then
     echo "Service installed but NOT started. Start with: sudo systemctl start aione-agent"
+else
+    echo "Service installed but NOT started. Start with: sudo ${INSTALL_DIR}/aione-agent -service start -config ${CONFIG_DIR}/agent.yaml"
 fi

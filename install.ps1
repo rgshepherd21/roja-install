@@ -113,8 +113,35 @@ try {
     }
     Write-Host "    ✓ checksum verified" -ForegroundColor Green
 
+    # --- replace any existing install (idempotent re-run, CR-8) -----------
+    # Deliberately AFTER download + checksum: a failed download must never
+    # take down a working agent. Mirrors install.sh's #79 pattern: stop the
+    # running service so Move-Item can replace the locked binary. Config is
+    # regenerated from this run's flags; DataDir (registered identity: mTLS
+    # key, action secret) and the service registration are preserved.
+    $existingSvc = Get-Service -Name "aione-agent" -ErrorAction SilentlyContinue
+    if ($existingSvc) {
+        Write-Host ">>> Existing install detected — stopping and replacing it" -ForegroundColor Cyan
+        if ($existingSvc.Status -ne "Stopped") {
+            Stop-Service -Name "aione-agent" -Force
+        }
+        # The SCM can keep the image file mapped briefly after Stopped.
+        Start-Sleep -Seconds 2
+    }
+
     # --- install ---------------------------------------------------------------
     New-Item -ItemType Directory -Path $InstallDir, $ConfigDir, $DataDir -Force | Out-Null
+
+    # Lock down C:\ProgramData\AIOne\Agent (CR-8). ProgramData's inherited
+    # defaults let ordinary local Users read agent.yaml (install token) and
+    # data\ (mTLS key + credential vault). Break inheritance and grant only
+    # SYSTEM + Administrators; DataDir is a child, so the (OI)(CI) ACEs
+    # propagate to it. SIDs instead of names so localized Windows (no
+    # "Administrators" group name) doesn't break the install:
+    # S-1-5-18 = SYSTEM, S-1-5-32-544 = Administrators.
+    & icacls $ConfigDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed to restrict $ConfigDir (exit $LASTEXITCODE)" }
+
     Move-Item -Force -Path $binaryPath -Destination (Join-Path $InstallDir "aione-agent.exe")
 
     # Write config. The install token is written directly: the agent runs
@@ -148,12 +175,18 @@ log:
     $configContent | Set-Content -Path (Join-Path $ConfigDir "agent.yaml") -Encoding UTF8
 
     # --- register as a Windows service ------------------------------------
-    Write-Host ">>> Installing Windows service" -ForegroundColor Cyan
-    $env:AIONE_INSTALL_TOKEN = $Token
-    & (Join-Path $InstallDir "aione-agent.exe") `
-        -service install `
-        -config (Join-Path $ConfigDir "agent.yaml")
-    if ($LASTEXITCODE -ne 0) { throw "-service install failed (exit $LASTEXITCODE)" }
+    # Re-registering an existing service fails ("service already exists"),
+    # so only run '-service install' on first install (CR-8 idempotency).
+    if (-not $existingSvc) {
+        Write-Host ">>> Installing Windows service" -ForegroundColor Cyan
+        $env:AIONE_INSTALL_TOKEN = $Token
+        & (Join-Path $InstallDir "aione-agent.exe") `
+            -service install `
+            -config (Join-Path $ConfigDir "agent.yaml")
+        if ($LASTEXITCODE -ne 0) { throw "-service install failed (exit $LASTEXITCODE)" }
+    } else {
+        Write-Host ">>> Service already registered — skipping -service install" -ForegroundColor Cyan
+    }
 
     if (-not $NoStart) {
         Start-Service aione-agent
