@@ -30,6 +30,15 @@
 .PARAMETER NoStart
   OPTIONAL. Install the service but don't start it.
 
+.PARAMETER Syslog
+  OPTIONAL. Enable the embedded syslog receiver on udp/514 so network
+  devices pointed at this host with `logging host <ip>` produce telemetry
+  events. Off by default: it claims a privileged port, and most agent
+  hosts are not a device's syslog target. (N1-A) The generated config now
+  always writes an explicit telemetry.syslog block — previously the block
+  was absent entirely, so the collector was unreachable by configuration
+  alone.
+
 .EXAMPLE
   iex "& { $(irm https://install.getroja.ai/install.ps1) } -Token <tok>"
 
@@ -46,7 +55,8 @@ param(
     [string]$Version = "",
     [string]$Backend = "https://agents.getroja.ai",
     [string]$Name = $env:COMPUTERNAME,
-    [switch]$NoStart
+    [switch]$NoStart,
+    [switch]$Syslog
 )
 
 Write-Host ">>> Backend: $Backend"
@@ -167,6 +177,38 @@ api:
 
 transport:
   insecure_skip_verify: false
+
+# N1-A: written unconditionally, enabled or not. The block being ABSENT
+# was the original fault — config.defaults() left SyslogConfig at its zero
+# value, so there was no supported way to turn the receiver on short of
+# hand-editing this file, and setting enabled: true without udp_addr bound
+# nothing while still reporting the collector healthy.
+#
+# The Windows service runs as LocalSystem, so binding udp/514 succeeds;
+# the host firewall still needs an inbound allow rule for it.
+telemetry:
+  syslog:
+    enabled: $($Syslog.IsPresent.ToString().ToLower())
+    udp_addr: "0.0.0.0:514"
+
+# U-1 (2026-07-31): written unconditionally, same reasoning as the syslog
+# block above. UpdaterConfig.Enabled is NOT set in config.defaults() — only
+# Channel, Interval and RequireSigned are — so it takes Go's zero value,
+# false. With the block absent, the periodic poll never runs and the console
+# Update button logs "self_update requested but updater disabled in config;
+# ignoring" and spins forever.
+#
+# Only `enabled` is specified: config.Load() applies YAML over defaults(),
+# so channel/interval/require_signed keep stable / 6h / true.
+#
+# NOTE (Windows-specific, still open): the kardianos Windows service path
+# relies on SCM recovery actions, which — like systemd's Restart=on-failure
+# — only fire on an ABNORMAL exit. The updater exits zero deliberately, so
+# a Windows agent may swap its binary successfully and then stay stopped.
+# The Linux side is fixed via a systemd drop-in in install.sh; the Windows
+# equivalent (sc.exe failure/failureflag) is NOT yet wired.
+updater:
+  enabled: true
 
 log:
   level: info

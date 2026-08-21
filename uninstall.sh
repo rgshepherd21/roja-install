@@ -92,6 +92,11 @@ fi
 # leave a zombie systemd unit (see internal/service/flock_unix.go), and
 # the binary may already be gone on a broken install — handle both.
 if [ "$(uname -s)" = "Linux" ]; then
+  # Remove the vault EnvironmentFile drop-in that install.sh added (the base
+  # unit itself is kardianos-generated and removed just below). The master key
+  # it references lives in DATA_DIR, so it follows the --purge rule with the
+  # rest of the vault rather than being deleted here.
+  rm -rf /etc/systemd/system/aione-agent.service.d
   if [ -f /etc/systemd/system/aione-agent.service ]; then
     systemctl disable aione-agent >/dev/null 2>&1 || true
     rm -f /etc/systemd/system/aione-agent.service
