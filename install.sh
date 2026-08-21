@@ -17,6 +17,15 @@
 #   --version=<vX.Y.Z>   OPTIONAL. Defaults to the latest release.
 #   --name=<str>         OPTIONAL. Defaults to the machine hostname.
 #   --no-start           OPTIONAL. Install the service but don't start it.
+#   --syslog             OPTIONAL. Enable the embedded syslog receiver on
+#                        udp/514 so network devices pointed at this host
+#                        with `logging host <ip>` produce telemetry events.
+#                        Off by default: it claims a privileged port, and
+#                        most agent hosts are not a device's syslog target.
+#                        (N1-A) The generated config now always writes an
+#                        explicit telemetry.syslog block — previously the
+#                        block was absent entirely, so the collector was
+#                        unreachable by configuration alone.
 #
 # Exits non-zero on any failure; safe to re-run (idempotent installs).
 #
@@ -49,6 +58,7 @@ VERSION=""
 BACKEND="https://agents.getroja.ai"
 NAME="$(hostname)"
 NO_START=false
+SYSLOG_ENABLED=false
 REPO="rgshepherd21/roja-install"   # public distribution repo (binaries mirrored on release)
 
 # --- arg parsing ------------------------------------------------------------
@@ -63,8 +73,15 @@ while [ $# -gt 0 ]; do
         --name=*)    NAME="${1#*=}";    shift ;;
         --name)      NAME="$2";         shift 2 ;;
         --no-start)  NO_START=true;     shift ;;
+        --syslog)    SYSLOG_ENABLED=true; shift ;;
         -h|--help)
-            sed -n '2,16p' "$0"; exit 0 ;;
+            # Range anchored on CONTENT, not a line number. The flags
+            # block above grows; a hardcoded end line silently drops the
+            # newest flags from --help without anyone noticing. As of
+            # 2026-07-27 '2,16p' was cutting off inside the --backend
+            # paragraph, hiding --version, --name, --no-start entirely --
+            # and would have hidden --syslog too.
+            sed -n '2,/^# Exits non-zero/p' "$0"; exit 0 ;;
         *)
             echo "ERROR: unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -214,6 +231,39 @@ api:
 transport:
   insecure_skip_verify: false
 
+# N1-A: written unconditionally, enabled or not. The block being ABSENT
+# was the original fault — config.defaults() left SyslogConfig at its zero
+# value, so there was no supported way to turn the receiver on short of
+# hand-editing this file, and setting enabled: true without udp_addr bound
+# nothing while still reporting the collector healthy. udp_addr is spelled
+# out here so the deployed config is self-documenting rather than relying
+# on the compiled-in default.
+#
+# The agent runs as root under systemd (this unit sets no User=), so
+# binding the privileged port 514 succeeds. Containerised deployments must
+# additionally publish it: docker run -p 514:514/udp ...
+telemetry:
+  syslog:
+    enabled: ${SYSLOG_ENABLED}
+    udp_addr: "0.0.0.0:514"
+
+# U-1 (2026-07-31): written unconditionally, exactly like the syslog block
+# above and for the identical reason. UpdaterConfig.Enabled is NOT set in
+# config.defaults() — only Channel, Interval and RequireSigned are — so it
+# takes Go's zero value, false. The block being ABSENT meant every agent
+# ever installed was un-updatable: the 6-hour poll never ran, and the
+# console Update button logged
+#   "self_update requested but updater disabled in config; ignoring"
+# and spun forever. That is why alpha.13 had to be hand-installed and never
+# reached the release catalog.
+#
+# Only `enabled` is specified: config.Load() does `cfg := defaults()` then
+# unmarshals the YAML over it, so channel/interval/require_signed keep their
+# defaults (stable / 6h / true). channel MUST match the channel the release
+# was published under or the agent never sees it.
+updater:
+  enabled: true
+
 log:
   level: info
   pretty: false
@@ -223,12 +273,85 @@ EOF
 # agent runs as root, so 600 root:root is sufficient.
 chmod 600 "${CONFIG_DIR}/agent.yaml"
 
+# --- credential-vault KEK (headless Linux) ---------------------------------
+# The sqlite vault above wraps its data-encryption key with an OS-platform
+# KEK. A headless Linux server has no Secret Service, so the agent's headless
+# KEK derives the wrapping key from AIONE_VAULT_MASTER_PASSWORD (PBKDF2).
+# Without it the agent can't open the vault (NewPlatformKEK -> ErrKEKUnavailable).
+# Generate a strong per-install master key ONCE and feed it to the service via
+# a systemd drop-in EnvironmentFile (added after the unit is created below).
+#
+# It lives in DATA_DIR (root 700) — NOT CONFIG_DIR — so it shares the exact
+# lifecycle of the wrapped DEK it protects (DATA_DIR/vault.key.enc): uninstall
+# WITHOUT --purge preserves both, so a re-install resumes the SAME vault;
+# --purge deletes both together. Putting it in CONFIG_DIR (which uninstall
+# always removes) while the DEK in DATA_DIR survives would, on the next
+# install, mint a new password that can't unwrap the old DEK — locking the
+# operator out of their credentials. Generated once, preserved on re-install.
+# macOS is intentionally skipped: its KEK is the Keychain (task #95 stub), not
+# the master-password path, so a password here would do nothing.
+if [ "$OS" = "linux" ]; then
+    VAULT_ENV="${DATA_DIR}/vault.env"
+    if [ ! -f "$VAULT_ENV" ]; then
+        ( umask 077
+          printf 'AIONE_VAULT_MASTER_PASSWORD=%s\n' \
+            "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" > "$VAULT_ENV" )
+        echo "    ✓ generated credential-vault master key (${VAULT_ENV})"
+    else
+        echo "    ✓ preserving existing credential-vault master key (${VAULT_ENV})"
+    fi
+    chmod 600 "$VAULT_ENV"
+    chown root:root "$VAULT_ENV" 2>/dev/null || true
+fi
+
 # --- register as a system service ------------------------------------------
 echo ">>> Installing system service"
 AIONE_INSTALL_TOKEN="$TOKEN" \
     "${INSTALL_DIR}/aione-agent" \
     -service install \
     -config "${CONFIG_DIR}/agent.yaml"
+
+# Wire the vault master key into the systemd unit via a drop-in so it's in the
+# service's environment on every boot. kardianos/service owns the base unit
+# ('-service install' above); a drop-in augments it without editing the
+# generated file and re-applies cleanly when the base unit is replaced on a
+# re-install. Linux/systemd only.
+if [ "$OS" = "linux" ]; then
+    DROPIN_DIR="/etc/systemd/system/aione-agent.service.d"
+    mkdir -p "$DROPIN_DIR"
+    cat > "${DROPIN_DIR}/vault.conf" <<EOF
+[Service]
+EnvironmentFile=${DATA_DIR}/vault.env
+EOF
+    chmod 644 "${DROPIN_DIR}/vault.conf"
+
+    # Restart policy (U-1, 2026-07-31). Two separate faults, both fatal to
+    # self-update, both fixed here:
+    #
+    #  1. Restart=always — the updater swaps the binary and exits ZERO on
+    #     purpose so the service manager starts the new one. Agents through
+    #     alpha.14 set Restart=on-failure (internal/service.newOSService),
+    #     under which systemd reads that clean exit as an intentional stop
+    #     and leaves the agent DEAD after a fully successful update. Fixed
+    #     in the agent for alpha.15+, but pinned here as well so a re-install
+    #     repairs hosts running an older binary — which is every host that
+    #     cannot self-update, i.e. exactly the ones that need it.
+    #
+    #  2. RestartSec=10 — kardianos/service HARDCODES RestartSec=120 in its
+    #     systemd template, so even with Restart=always every update leaves
+    #     the agent dark for two minutes. It is not settable through the
+    #     service.Config Option map; a drop-in is the only lever.
+    #
+    # Kept separate from vault.conf so the two concerns stay independently
+    # greppable and either can be removed without disturbing the other.
+    cat > "${DROPIN_DIR}/restart.conf" <<EOF
+[Service]
+Restart=always
+RestartSec=10
+EOF
+    chmod 644 "${DROPIN_DIR}/restart.conf"
+    systemctl daemon-reload
+fi
 
 if [ "$NO_START" = false ]; then
     if [ "$OS" = "linux" ]; then
