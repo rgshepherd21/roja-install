@@ -13,18 +13,29 @@ name: Pages
 # repo produced NO check on any PR, so a green-CI sweep could not see its work
 # at all -- an absent check reads as "done" rather than "unverified". That is
 # how the node20 bumps in #1 sat open past their siblings on a dated deadline.
+#
+# ★ The two paths lists below are duplicated ON PURPOSE and must be kept in
+# step. GitHub Actions does not support YAML anchors, so &alias / *alias would
+# be unsupported here -- and a paths filter that silently matched nothing
+# would give this repo a trigger that never fires, which is the defect this
+# workflow exists to close, wearing the appearance of a fix.
 
 on:
   push:
     branches: [main]
-    paths: &site_paths
+    paths:
       - 'install.sh'
       - 'install.ps1'
       - 'index.html'
       - '.github/assemble-site.sh'
       - '.github/workflows/pages.yml'
   pull_request:
-    paths: *site_paths
+    paths:
+      - 'install.sh'
+      - 'install.ps1'
+      - 'index.html'
+      - '.github/assemble-site.sh'
+      - '.github/workflows/pages.yml'
   workflow_dispatch:
 
 concurrency:
