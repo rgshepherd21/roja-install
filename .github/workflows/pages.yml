@@ -6,20 +6,30 @@ name: Pages
 # and intentionally public; the agent SOURCE/IP lives in the private
 # rgshepherd21/aione-agent repo and is mirrored here on release.
 #
-# Triggers: push to main touching the scripts/workflow, or manual dispatch.
+# Triggers: push to main touching the scripts/workflow, pull_request touching
+# the same paths (validate only, never publish), or manual dispatch.
+#
+# ★ The pull_request trigger is load-bearing, not decoration. Without it this
+# repo produced NO check on any PR, so a green-CI sweep could not see its work
+# at all -- an absent check reads as "done" rather than "unverified". That is
+# how the node20 bumps in #1 sat open past their siblings on a dated deadline.
 
 on:
   push:
     branches: [main]
-    paths:
+    paths: &site_paths
       - 'install.sh'
       - 'install.ps1'
       - 'index.html'
       - '.github/workflows/pages.yml'
+  pull_request:
+    paths: *site_paths
   workflow_dispatch:
 
 concurrency:
-  group: pages
+  # Keyed by ref so a PR validation cannot cancel an in-flight production
+  # deploy of main, which the previous single 'pages' group allowed.
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -28,22 +38,50 @@ permissions:
   id-token: write
 
 jobs:
+  validate:
+    name: Validate site assembles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Assemble site
+        run: ./.github/assemble-site.sh
+      - name: Every path index.html advertises must be published
+        # A trigger whose check cannot fail is the same defect as no trigger.
+        # index.html advertises fetchable URLs; this workflow decides what
+        # lands in _site. Nothing connected the two, and they are already out
+        # of step: the documented uninstall.sh URL 404s in production.
+        run: |
+          set -euo pipefail
+          missing=0
+          # Any https://install.getroja.ai/<file> referenced by the landing page.
+          grep -oE 'install\.getroja\.ai/[A-Za-z0-9._-]+' index.html \
+            | sed 's|.*install\.getroja\.ai/||' | sort -u > /tmp/advertised
+          while read -r f; do
+            [ -z "$f" ] && continue
+            if [ ! -f "_site/$f" ]; then
+              echo "::error::index.html advertises /$f but _site/$f is not published"
+              missing=1
+            else
+              echo "ok: /$f is published"
+            fi
+          done < /tmp/advertised
+          exit "$missing"
+
   deploy:
     name: Deploy install scripts to GitHub Pages
+    needs: validate
+    # ★ Never publish from a pull request. This host is what a customer's
+    # first command fetches; a PR branch must not be able to reach it.
+    if: github.event_name != 'pull_request'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Prepare site directory
-        run: |
-          mkdir -p _site
-          cp install.sh _site/install.sh
-          cp install.ps1 _site/install.ps1
-          echo "install.getroja.ai" > _site/CNAME
-          cp index.html _site/index.html
-          ls -la _site/
+      - name: Assemble site
+        # Same script as validate, so what is checked is what is published.
+        run: ./.github/assemble-site.sh
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with:
