@@ -1,0 +1,22 @@
+# Node 20 leaves GitHub Actions runners on 2026-09-16. This repo's only job is
+# publishing install.getroja.ai — the first thing a customer touches — so if its
+# Pages actions go dark the installer stops updating.
+#
+# Scope note, so this file is not read as doing more than it does: dependabot
+# watches ACTION VERSIONS. It cannot see that install.sh here has drifted from
+# aione-agent/install/install.sh, because that is cross-repo file mirroring, not
+# a dependency. That divergence is real and CURRENTLY OPEN (~133 diff lines as
+# of 2026-08-21, including the missing --syslog flag and the --help truncation
+# fix), and closing it needs a sync CI job in aione-agent, not this file.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
