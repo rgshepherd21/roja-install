@@ -21,6 +21,7 @@ on:
       - 'install.sh'
       - 'install.ps1'
       - 'index.html'
+      - '.github/assemble-site.sh'
       - '.github/workflows/pages.yml'
   pull_request:
     paths: *site_paths
@@ -44,12 +45,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Assemble site
-        run: ./.github/assemble-site.sh
+        # `bash <path>`, not `./<path>`: files written through the contents
+        # API land as mode 100644, so the executable bit is not set.
+        run: bash .github/assemble-site.sh
       - name: Every path index.html advertises must be published
         # A trigger whose check cannot fail is the same defect as no trigger.
-        # index.html advertises fetchable URLs; this workflow decides what
-        # lands in _site. Nothing connected the two, and they are already out
-        # of step: the documented uninstall.sh URL 404s in production.
+        # index.html advertises fetchable URLs; the assembly script decides
+        # what lands in _site. Nothing connected the two, and they are already
+        # out of step: the documented uninstall.sh URL 404s in production.
         run: |
           set -euo pipefail
           missing=0
@@ -81,7 +84,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Assemble site
         # Same script as validate, so what is checked is what is published.
-        run: ./.github/assemble-site.sh
+        run: bash .github/assemble-site.sh
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with:
