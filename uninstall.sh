@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uninstall.sh — AI One agent uninstaller (Linux + macOS)
+# uninstall.sh — Roja agent uninstaller (Linux + macOS)
 #
 # Usage:
 #   curl -sSL https://install.getroja.ai/uninstall.sh | sudo bash
@@ -44,32 +44,37 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+# Removes the Roja agent and, on a host installed before the rename (R51),
+# the aione-agent one: whichever names are present.
 case "$(uname -s)" in
-  Linux)
-    INSTALL_DIR="/opt/aione-agent"
-    CONFIG_DIR="/etc/aione-agent"
-    DATA_DIR="/var/lib/aione-agent"
-    ;;
-  Darwin)
-    INSTALL_DIR="/usr/local/opt/aione-agent"
-    CONFIG_DIR="/usr/local/etc/aione-agent"
-    DATA_DIR="/usr/local/var/aione-agent"
-    ;;
+  Linux)   PREFIXES="/opt /etc /var/lib" ;;
+  Darwin)  PREFIXES="/usr/local/opt /usr/local/etc /usr/local/var" ;;
   *)
     echo "ERROR: unsupported OS: $(uname -s)" >&2; exit 1 ;;
 esac
+set -- $PREFIXES
+INSTALL_BASE="$1"; CONFIG_BASE="$2"; DATA_BASE="$3"
+
+# The data directories present (identity + vault), Roja first.
+DATA_DIRS=""
+for name in roja-agent aione-agent; do
+  [ -d "${DATA_BASE}/${name}" ] && DATA_DIRS="${DATA_DIRS} ${DATA_BASE}/${name}"
+done
 
 # Surface the agent ID before anything is removed (needed for the
 # console-side revoke afterwards). registration.json is 0600 root.
 AGENT_ID=""
-if [ -f "${DATA_DIR}/registration.json" ]; then
-  AGENT_ID="$(sed -n 's/.*"agent_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${DATA_DIR}/registration.json" | head -1)"
-fi
+for d in $DATA_DIRS; do
+  if [ -f "${d}/registration.json" ]; then
+    id="$(sed -n 's/.*"agent_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${d}/registration.json" | head -1)"
+    [ -n "$id" ] && AGENT_ID="${AGENT_ID:+${AGENT_ID} }${id}"
+  fi
+done
 
 # --purge safety: destroying the vault + identity is irreversible.
 if [ "$PURGE" -eq 1 ] && [ "$ASSUME_YES" -ne 1 ]; then
   if [ -t 0 ]; then
-    printf -- "--purge will DELETE the credential vault and this agent's identity (%s). Type 'purge' to confirm: " "${DATA_DIR}"
+    printf -- "--purge will DELETE the credential vault and this agent's identity (%s). Type 'purge' to confirm: " "${DATA_DIRS# }"
     read -r answer
     [ "$answer" = "purge" ] || { echo "Aborted."; exit 1; }
   else
@@ -78,55 +83,64 @@ if [ "$PURGE" -eq 1 ] && [ "$ASSUME_YES" -ne 1 ]; then
   fi
 fi
 
-echo ">>> Stopping service"
-if command -v systemctl >/dev/null 2>&1; then
-  systemctl stop aione-agent 2>/dev/null || true
-fi
+for name in roja-agent aione-agent; do
+  INSTALL_DIR="${INSTALL_BASE}/${name}"
+  CONFIG_DIR="${CONFIG_BASE}/${name}"
 
-echo ">>> Deregistering service"
-# Prefer the binary's own service manager (matches how it was installed) …
-if [ -x "${INSTALL_DIR}/aione-agent" ]; then
-  "${INSTALL_DIR}/aione-agent" -service uninstall 2>/dev/null || true
-fi
-# … then belt-and-braces manual cleanup. History: a failed uninstall can
-# leave a zombie systemd unit (see internal/service/flock_unix.go), and
-# the binary may already be gone on a broken install — handle both.
-if [ "$(uname -s)" = "Linux" ]; then
-  # Remove the vault EnvironmentFile drop-in that install.sh added (the base
-  # unit itself is kardianos-generated and removed just below). The master key
-  # it references lives in DATA_DIR, so it follows the --purge rule with the
-  # rest of the vault rather than being deleted here.
-  rm -rf /etc/systemd/system/aione-agent.service.d
-  if [ -f /etc/systemd/system/aione-agent.service ]; then
-    systemctl disable aione-agent >/dev/null 2>&1 || true
-    rm -f /etc/systemd/system/aione-agent.service
-    systemctl daemon-reload
+  echo ">>> Stopping service ${name}"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop "$name" 2>/dev/null || true
   fi
-else
-  for plist in /Library/LaunchDaemons/*aione-agent*.plist; do
-    [ -e "$plist" ] || continue
-    launchctl unload "$plist" 2>/dev/null || true
-    rm -f "$plist"
-  done
-fi
 
-echo ">>> Removing binary (${INSTALL_DIR})"
-rm -rf "${INSTALL_DIR}"
+  echo ">>> Deregistering service ${name}"
+  # Prefer the binary's own service manager (matches how it was installed) …
+  if [ -x "${INSTALL_DIR}/${name}" ]; then
+    "${INSTALL_DIR}/${name}" -service uninstall 2>/dev/null || true
+  fi
+  # … then belt-and-braces manual cleanup. History: a failed uninstall can
+  # leave a zombie systemd unit (see internal/service/flock_unix.go), and
+  # the binary may already be gone on a broken install — handle both.
+  if [ "$(uname -s)" = "Linux" ]; then
+    # Remove the drop-ins install.sh added (vault EnvironmentFile, restart
+    # policy). The master key the vault one references lives in the data
+    # dir, so it follows the --purge rule with the rest of the vault.
+    rm -rf "/etc/systemd/system/${name}.service.d"
+    if [ -f "/etc/systemd/system/${name}.service" ]; then
+      systemctl disable "$name" >/dev/null 2>&1 || true
+      rm -f "/etc/systemd/system/${name}.service"
+      systemctl daemon-reload
+    fi
+  else
+    for plist in /Library/LaunchDaemons/*"${name}"*.plist; do
+      [ -e "$plist" ] || continue
+      launchctl unload "$plist" 2>/dev/null || true
+      rm -f "$plist"
+    done
+  fi
 
-echo ">>> Removing config (${CONFIG_DIR})"
-rm -rf "${CONFIG_DIR}"
+  if [ -d "$INSTALL_DIR" ]; then
+    echo ">>> Removing binary (${INSTALL_DIR})"
+    rm -rf "${INSTALL_DIR}"
+  fi
+  if [ -d "$CONFIG_DIR" ]; then
+    echo ">>> Removing config (${CONFIG_DIR})"
+    rm -rf "${CONFIG_DIR}"
+  fi
+done
 
-if [ "$PURGE" -eq 1 ]; then
-  echo ">>> Purging data dir (${DATA_DIR}) — identity + vault deleted"
-  rm -rf "${DATA_DIR}"
-else
-  echo ">>> PRESERVED data dir (${DATA_DIR}): agent identity, credential"
-  echo "    vault, cached registry. Reinstalling resumes this agent."
-  echo "    To remove it too, re-run with: --purge"
-fi
+for d in $DATA_DIRS; do
+  if [ "$PURGE" -eq 1 ]; then
+    echo ">>> Purging data dir (${d}) — identity + vault deleted"
+    rm -rf "${d}"
+  else
+    echo ">>> PRESERVED data dir (${d}): agent identity, credential"
+    echo "    vault, cached registry. Reinstalling resumes this agent."
+    echo "    To remove it too, re-run with: --purge"
+  fi
+done
 
 echo ""
-echo "=== AI One agent uninstalled ==="
+echo "=== Roja agent uninstalled ==="
 if [ -n "$AGENT_ID" ]; then
   echo "Final step (server side): revoke this agent in the Roja console"
   echo "  Console -> Devices -> Agents -> Revoke: ${AGENT_ID}"

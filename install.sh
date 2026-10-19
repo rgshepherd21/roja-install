@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — AI One agent installer (Linux + macOS)
+# install.sh — Roja agent installer (Linux + macOS)
 #
 # Usage:
 #   curl -sSL https://install.getroja.ai/install.sh | sudo bash -s -- \
@@ -60,6 +60,13 @@ NAME="$(hostname)"
 NO_START=false
 SYSLOG_ENABLED=false
 REPO="rgshepherd21/roja-install"   # public distribution repo (binaries mirrored on release)
+
+# Names (R51: the agent is Roja). LEGACY is the pre-R51 name: a host
+# installed before the rename has the aione-agent service and directories,
+# and this script replaces that install in place (see "replace any existing
+# install" below).
+AGENT="roja-agent"
+LEGACY="aione-agent"
 
 # --- arg parsing ------------------------------------------------------------
 while [ $# -gt 0 ]; do
@@ -127,30 +134,46 @@ if [ -z "$VERSION" ]; then
     [ -n "$VERSION" ] || { echo "ERROR: could not resolve a version from GitHub API (no releases?)" >&2; exit 1; }
 fi
 
-echo ">>> Installing aione-agent ${VERSION} for ${OS}-${ARCH}"
+echo ">>> Installing ${AGENT} ${VERSION} for ${OS}-${ARCH}"
 
 # --- paths ------------------------------------------------------------------
 if [ "$OS" = "linux" ]; then
-    INSTALL_DIR="/opt/aione-agent"
-    CONFIG_DIR="/etc/aione-agent"
-    DATA_DIR="/var/lib/aione-agent"
+    INSTALL_DIR="/opt/${AGENT}";             LEGACY_INSTALL_DIR="/opt/${LEGACY}"
+    CONFIG_DIR="/etc/${AGENT}";              LEGACY_CONFIG_DIR="/etc/${LEGACY}"
+    DATA_DIR="/var/lib/${AGENT}";            LEGACY_DATA_DIR="/var/lib/${LEGACY}"
 else
-    INSTALL_DIR="/usr/local/opt/aione-agent"
-    CONFIG_DIR="/usr/local/etc/aione-agent"
-    DATA_DIR="/usr/local/var/aione-agent"
+    INSTALL_DIR="/usr/local/opt/${AGENT}";   LEGACY_INSTALL_DIR="/usr/local/opt/${LEGACY}"
+    CONFIG_DIR="/usr/local/etc/${AGENT}";    LEGACY_CONFIG_DIR="/usr/local/etc/${LEGACY}"
+    DATA_DIR="/usr/local/var/${AGENT}";      LEGACY_DATA_DIR="/usr/local/var/${LEGACY}"
 fi
 
-BINARY_NAME="aione-agent-${VERSION}-${OS}-${ARCH}"
-BINARY_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}"
-CHECKSUM_URL="${BINARY_URL}.sha256"
+# A pre-R51 host keeps its DATA_DIR where it is. It holds the agent's
+# registered identity and its credential vault, and the vault's key
+# derivation is bound to the directory's path: moving it would lock the
+# vault. Only a host with no data directory yet gets the Roja path.
+if [ ! -d "$DATA_DIR" ] && [ -d "$LEGACY_DATA_DIR" ]; then
+    DATA_DIR="$LEGACY_DATA_DIR"
+fi
+
+# Release assets are roja-agent-<version>-<os>-<arch> from R51 on. A release
+# before R51 has only aione-agent assets and a binary that expects the
+# aione-agent paths and service, so this installer refuses it (below).
+RELEASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+BINARY_NAME="${AGENT}-${VERSION}-${OS}-${ARCH}"
 
 # --- download + verify ------------------------------------------------------
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 echo ">>> Downloading ${BINARY_NAME}"
-curl -fsSL -o "${TMPDIR}/agent" "$BINARY_URL"
-curl -fsSL -o "${TMPDIR}/agent.sha256" "$CHECKSUM_URL"
+if ! curl -fsSL -o "${TMPDIR}/agent" "${RELEASE_URL}/${BINARY_NAME}"; then
+    echo "ERROR: could not download ${BINARY_NAME} from ${RELEASE_URL}." >&2
+    echo "  A release before R51 has no ${AGENT} binary (it predates the Roja" >&2
+    echo "  rename) and needs the installer from its own era. Omit --version to" >&2
+    echo "  install the latest release." >&2
+    exit 1
+fi
+curl -fsSL -o "${TMPDIR}/agent.sha256" "${RELEASE_URL}/${BINARY_NAME}.sha256"
 
 EXPECTED="$(awk '{print $1}' "${TMPDIR}/agent.sha256")"
 if command -v sha256sum >/dev/null 2>&1; then
@@ -181,26 +204,40 @@ fi
 # agent's registered identity (mTLS key, action secret), which survives
 # re-installs; the config is regenerated from this run's flags.
 if [ "$OS" = "linux" ]; then
-    if [ -f /etc/systemd/system/aione-agent.service ]; then
-        echo ">>> Existing install detected — stopping and replacing it"
-        systemctl stop aione-agent 2>/dev/null || true
-        systemctl disable aione-agent >/dev/null 2>&1 || true
-        rm -f /etc/systemd/system/aione-agent.service
+    for svc in "$AGENT" "$LEGACY"; do
+        [ -f "/etc/systemd/system/${svc}.service" ] || continue
+        echo ">>> Existing install detected (${svc}) — stopping and replacing it"
+        systemctl stop "$svc" 2>/dev/null || true
+        systemctl disable "$svc" >/dev/null 2>&1 || true
+        rm -f "/etc/systemd/system/${svc}.service"
+        # The legacy unit's drop-ins (vault.conf, restart.conf) go with it;
+        # the Roja unit's are rewritten below.
+        [ "$svc" = "$LEGACY" ] && rm -rf "/etc/systemd/system/${LEGACY}.service.d"
         systemctl daemon-reload
-    fi
+    done
 else
-    for plist in /Library/LaunchDaemons/*aione-agent*.plist; do
+    for plist in /Library/LaunchDaemons/*"${AGENT}"*.plist /Library/LaunchDaemons/*"${LEGACY}"*.plist; do
         [ -e "$plist" ] || continue
         echo ">>> Existing install detected — stopping and replacing it"
         launchctl unload "$plist" 2>/dev/null || true
         rm -f "$plist"
     done
 fi
+# The pre-R51 binary and config directories are replaced by the Roja ones
+# (the config is regenerated from this run's flags below). The legacy DATA_DIR
+# is never removed here: see "paths" above.
+if [ -d "$LEGACY_INSTALL_DIR" ]; then
+    echo ">>> Removing the pre-rename binary directory ${LEGACY_INSTALL_DIR}"
+    rm -rf "$LEGACY_INSTALL_DIR"
+fi
+if [ -d "$LEGACY_CONFIG_DIR" ]; then
+    rm -rf "$LEGACY_CONFIG_DIR"
+fi
 
 # --- install ---------------------------------------------------------------
 mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$DATA_DIR"
-mv "${TMPDIR}/agent" "${INSTALL_DIR}/aione-agent"
-chmod 755 "${INSTALL_DIR}/aione-agent"
+mv "${TMPDIR}/agent" "${INSTALL_DIR}/${AGENT}"
+chmod 755 "${INSTALL_DIR}/${AGENT}"
 # DATA_DIR holds the agent's mTLS private key and the encrypted credential
 # vault — owner-only (CR-8). The service runs as root (the systemd unit has
 # no User= — kardianos default — and launchd daemons run as root), so 700
@@ -210,7 +247,7 @@ chmod 700 "$DATA_DIR"
 # Write config. install_token is baked in literally because kardianos/service
 # doesn't propagate install-time env vars into the systemd unit's Environment=
 # directives, so a first-boot agent started by systemd would see an empty
-# $AIONE_INSTALL_TOKEN and refuse to register. Tokens are single-use anyway —
+# $ROJA_INSTALL_TOKEN and refuse to register. Tokens are single-use anyway —
 # post-registration they're dead weight, not a credential.
 cat > "${CONFIG_DIR}/agent.yaml" <<EOF
 agent:
@@ -257,7 +294,7 @@ telemetry:
 # and spun forever. That is why alpha.13 had to be hand-installed and never
 # reached the release catalog.
 #
-# Only `enabled` is specified: config.Load() does `cfg := defaults()` then
+# Only 'enabled' is specified: config.Load() does 'cfg := defaults()' then
 # unmarshals the YAML over it, so channel/interval/require_signed keep their
 # defaults (stable / 6h / true). channel MUST match the channel the release
 # was published under or the agent never sees it.
@@ -276,7 +313,9 @@ chmod 600 "${CONFIG_DIR}/agent.yaml"
 # --- credential-vault KEK (headless Linux) ---------------------------------
 # The sqlite vault above wraps its data-encryption key with an OS-platform
 # KEK. A headless Linux server has no Secret Service, so the agent's headless
-# KEK derives the wrapping key from AIONE_VAULT_MASTER_PASSWORD (PBKDF2).
+# KEK derives the wrapping key from ROJA_VAULT_MASTER_PASSWORD (PBKDF2). A
+# pre-R51 vault.env names it AIONE_VAULT_MASTER_PASSWORD; the agent reads
+# either, and an existing file is preserved as it is.
 # Without it the agent can't open the vault (NewPlatformKEK -> ErrKEKUnavailable).
 # Generate a strong per-install master key ONCE and feed it to the service via
 # a systemd drop-in EnvironmentFile (added after the unit is created below).
@@ -294,7 +333,7 @@ if [ "$OS" = "linux" ]; then
     VAULT_ENV="${DATA_DIR}/vault.env"
     if [ ! -f "$VAULT_ENV" ]; then
         ( umask 077
-          printf 'AIONE_VAULT_MASTER_PASSWORD=%s\n' \
+          printf 'ROJA_VAULT_MASTER_PASSWORD=%s\n' \
             "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" > "$VAULT_ENV" )
         echo "    ✓ generated credential-vault master key (${VAULT_ENV})"
     else
@@ -306,8 +345,8 @@ fi
 
 # --- register as a system service ------------------------------------------
 echo ">>> Installing system service"
-AIONE_INSTALL_TOKEN="$TOKEN" \
-    "${INSTALL_DIR}/aione-agent" \
+ROJA_INSTALL_TOKEN="$TOKEN" \
+    "${INSTALL_DIR}/${AGENT}" \
     -service install \
     -config "${CONFIG_DIR}/agent.yaml"
 
@@ -317,7 +356,7 @@ AIONE_INSTALL_TOKEN="$TOKEN" \
 # generated file and re-applies cleanly when the base unit is replaced on a
 # re-install. Linux/systemd only.
 if [ "$OS" = "linux" ]; then
-    DROPIN_DIR="/etc/systemd/system/aione-agent.service.d"
+    DROPIN_DIR="/etc/systemd/system/${AGENT}.service.d"
     mkdir -p "$DROPIN_DIR"
     cat > "${DROPIN_DIR}/vault.conf" <<EOF
 [Service]
@@ -356,34 +395,34 @@ fi
 if [ "$NO_START" = false ]; then
     if [ "$OS" = "linux" ]; then
         systemctl daemon-reload
-        systemctl enable aione-agent >/dev/null
-        systemctl start aione-agent
+        systemctl enable "$AGENT" >/dev/null
+        systemctl start "$AGENT"
         sleep 2
-        if systemctl is-active --quiet aione-agent; then
+        if systemctl is-active --quiet "$AGENT"; then
             echo "    ✓ service started"
         else
-            echo "WARN: service did not reach active state; check journalctl -u aione-agent" >&2
+            echo "WARN: service did not reach active state; check journalctl -u ${AGENT}" >&2
         fi
     else
         # '-service install' above wrote /Library/LaunchDaemons/
-        # aione-agent.plist (kardianos); '-service start' launchctl-loads
+        # roja-agent.plist (kardianos); '-service start' launchctl-loads
         # it. Before CR-8 this branch only printed a hint, so macOS
         # installs never actually started heartbeating despite the
         # closing message promising it.
-        "${INSTALL_DIR}/aione-agent" -service start -config "${CONFIG_DIR}/agent.yaml"
+        "${INSTALL_DIR}/${AGENT}" -service start -config "${CONFIG_DIR}/agent.yaml"
         sleep 2
-        if launchctl list 2>/dev/null | grep -q aione-agent; then
+        if launchctl list 2>/dev/null | grep -q "$AGENT"; then
             echo "    ✓ service started"
         else
-            echo "WARN: service did not start; check: sudo launchctl list | grep aione-agent" >&2
+            echo "WARN: service did not start; check: sudo launchctl list | grep ${AGENT}" >&2
         fi
     fi
 fi
 
 cat <<EOF
 
-✓ aione-agent ${VERSION} installed
-  binary:  ${INSTALL_DIR}/aione-agent
+✓ ${AGENT} ${VERSION} installed
+  binary:  ${INSTALL_DIR}/${AGENT}
   config:  ${CONFIG_DIR}/agent.yaml
   data:    ${DATA_DIR}
 
@@ -392,7 +431,7 @@ EOF
 if [ "$NO_START" = false ]; then
     echo "Check the Roja chat UI — the new host should appear within 30 s."
 elif [ "$OS" = "linux" ]; then
-    echo "Service installed but NOT started. Start with: sudo systemctl start aione-agent"
+    echo "Service installed but NOT started. Start with: sudo systemctl start ${AGENT}"
 else
-    echo "Service installed but NOT started. Start with: sudo ${INSTALL_DIR}/aione-agent -service start -config ${CONFIG_DIR}/agent.yaml"
+    echo "Service installed but NOT started. Start with: sudo ${INSTALL_DIR}/${AGENT} -service start -config ${CONFIG_DIR}/agent.yaml"
 fi

@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-  AI One agent installer (Windows).
+  Roja agent installer (Windows).
 
 .DESCRIPTION
-  Downloads the aione-agent binary for the current architecture from
+  Downloads the roja-agent binary for the current architecture from
   GitHub Releases, verifies its SHA-256 checksum, writes a config, and
   installs it as a Windows service via the agent's built-in installer.
 
@@ -21,7 +21,7 @@
   dev / on-prem / split-ingress installs.
   History: OPTIONAL before 2026-05-17 with a hardcoded default pointing
   at the dev tenant (hazardous), then REQUIRED, then defaulted again on
-  2026-06-09 — this time to the CANONICAL public production URL, which
+  2026-06-09 - this time to the CANONICAL public production URL, which
   cannot recreate the stale-dev-FQDN hazard.
 
 .PARAMETER Name
@@ -35,7 +35,7 @@
   devices pointed at this host with `logging host <ip>` produce telemetry
   events. Off by default: it claims a privileged port, and most agent
   hosts are not a device's syslog target. (N1-A) The generated config now
-  always writes an explicit telemetry.syslog block — previously the block
+  always writes an explicit telemetry.syslog block - previously the block
   was absent entirely, so the collector was unreachable by configuration
   alone.
 
@@ -84,7 +84,7 @@ if (-not $Version) {
         $latest = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
         $Version = $latest.tag_name
     } catch {
-        # 404 or other — try the unfiltered list next.
+        # 404 or other - try the unfiltered list next.
     }
     if (-not $Version) {
         try {
@@ -96,32 +96,57 @@ if (-not $Version) {
     }
     if (-not $Version) { throw "GitHub returned no releases" }
 }
-Write-Host ">>> Installing aione-agent $Version for windows-$Arch" -ForegroundColor Cyan
+# Names (R51: the agent is Roja). $Legacy is the pre-R51 name: a host
+# installed before the rename has the aione-agent service and AIOne
+# directories, and this script replaces that install (see below).
+$Agent  = "roja-agent"
+$Legacy = "aione-agent"
+
+Write-Host ">>> Installing $Agent $Version for windows-$Arch" -ForegroundColor Cyan
 
 # --- paths -----------------------------------------------------------------
-$InstallDir  = "C:\Program Files\AIOne\Agent"
-$ConfigDir   = "C:\ProgramData\AIOne\Agent"
-$DataDir     = "C:\ProgramData\AIOne\Agent\data"
-$BinaryName  = "aione-agent-$Version-windows-$Arch.exe"
-$BinaryUrl   = "https://github.com/$Repo/releases/download/$Version/$BinaryName"
-$ChecksumUrl = "$BinaryUrl.sha256"
+$InstallDir        = "C:\Program Files\Roja\Agent"
+$ConfigDir         = "C:\ProgramData\Roja\Agent"
+$DataDir           = "C:\ProgramData\Roja\Agent\data"
+$LegacyInstallDir  = "C:\Program Files\AIOne\Agent"
+$LegacyConfigDir   = "C:\ProgramData\AIOne\Agent"
+$LegacyDataDir     = "C:\ProgramData\AIOne\Agent\data"
+
+# A pre-R51 host keeps its data directory where it is. It holds the agent's
+# registered identity and its credential vault, and the vault's DPAPI
+# entropy is bound to the directory's path: moving it would lock the vault.
+if (-not (Test-Path $DataDir) -and (Test-Path $LegacyDataDir)) {
+    $DataDir = $LegacyDataDir
+}
+
+# Release assets are roja-agent-<version>-windows-<arch>.exe from R51 on. A
+# release before R51 has only aione-agent assets and a binary that expects
+# the AIOne paths and service, so this installer refuses it (below).
+$ReleaseUrl  = "https://github.com/$Repo/releases/download/$Version"
+$BinaryName  = "$Agent-$Version-windows-$Arch.exe"
 
 # --- download + verify -----------------------------------------------------
-$tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "aione-install-$(Get-Random)") -Force
+$tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "roja-install-$(Get-Random)") -Force
 try {
-    $binaryPath   = Join-Path $tmp "aione-agent.exe"
-    $checksumPath = Join-Path $tmp "aione-agent.exe.sha256"
+    $binaryPath   = Join-Path $tmp "$Agent.exe"
+    $checksumPath = Join-Path $tmp "$Agent.exe.sha256"
 
     Write-Host ">>> Downloading $BinaryName" -ForegroundColor Cyan
-    Invoke-WebRequest -Uri $BinaryUrl   -OutFile $binaryPath   -UseBasicParsing
-    Invoke-WebRequest -Uri $ChecksumUrl -OutFile $checksumPath -UseBasicParsing
+    try {
+        Invoke-WebRequest -Uri "$ReleaseUrl/$BinaryName" -OutFile $binaryPath -UseBasicParsing
+    } catch {
+        throw ("Could not download $BinaryName from $ReleaseUrl. A release before R51 has no " +
+               "$Agent binary (it predates the Roja rename) and needs the installer from its " +
+               "own era. Omit -Version to install the latest release.")
+    }
+    Invoke-WebRequest -Uri "$ReleaseUrl/$BinaryName.sha256" -OutFile $checksumPath -UseBasicParsing
 
     $expected = (Get-Content $checksumPath -Raw).Split(' ')[0].Trim().ToLower()
     $actual   = (Get-FileHash -Algorithm SHA256 -Path $binaryPath).Hash.ToLower()
     if ($expected -ne $actual) {
         throw "Checksum mismatch: expected $expected, got $actual"
     }
-    Write-Host "    ✓ checksum verified" -ForegroundColor Green
+    Write-Host "    OK: checksum verified" -ForegroundColor Green
 
     # --- replace any existing install (idempotent re-run, CR-8) -----------
     # Deliberately AFTER download + checksum: a failed download must never
@@ -129,30 +154,59 @@ try {
     # running service so Move-Item can replace the locked binary. Config is
     # regenerated from this run's flags; DataDir (registered identity: mTLS
     # key, action secret) and the service registration are preserved.
-    $existingSvc = Get-Service -Name "aione-agent" -ErrorAction SilentlyContinue
+    $existingSvc = Get-Service -Name $Agent -ErrorAction SilentlyContinue
     if ($existingSvc) {
-        Write-Host ">>> Existing install detected — stopping and replacing it" -ForegroundColor Cyan
+        Write-Host ">>> Existing install detected - stopping and replacing it" -ForegroundColor Cyan
         if ($existingSvc.Status -ne "Stopped") {
-            Stop-Service -Name "aione-agent" -Force
+            Stop-Service -Name $Agent -Force
         }
         # The SCM can keep the image file mapped briefly after Stopped.
         Start-Sleep -Seconds 2
     }
 
+    # A pre-R51 install is replaced by the Roja one: its service is removed
+    # (the Roja service is registered below), and so are its binary and its
+    # config. Its data directory stays (see "paths" above).
+    $legacySvc = Get-Service -Name $Legacy -ErrorAction SilentlyContinue
+    if ($legacySvc) {
+        Write-Host ">>> Pre-rename install detected ($Legacy) - replacing it" -ForegroundColor Cyan
+        if ($legacySvc.Status -ne "Stopped") {
+            Stop-Service -Name $Legacy -Force
+        }
+        # The legacy binary's own uninstall also removes its event-log
+        # source; sc.exe is the fallback when the binary is gone.
+        $legacyExe = Join-Path $LegacyInstallDir "$Legacy.exe"
+        if (Test-Path $legacyExe) { & $legacyExe -service uninstall 2>$null }
+        if (Get-Service -Name $Legacy -ErrorAction SilentlyContinue) {
+            & sc.exe delete $Legacy | Out-Null
+        }
+        Start-Sleep -Seconds 2
+    }
+    if (Test-Path $LegacyInstallDir) {
+        Remove-Item -Recurse -Force $LegacyInstallDir -ErrorAction SilentlyContinue
+    }
+    Remove-Item -Force (Join-Path $LegacyConfigDir "agent.yaml") -ErrorAction SilentlyContinue
+
     # --- install ---------------------------------------------------------------
     New-Item -ItemType Directory -Path $InstallDir, $ConfigDir, $DataDir -Force | Out-Null
 
-    # Lock down C:\ProgramData\AIOne\Agent (CR-8). ProgramData's inherited
+    # Lock down C:\ProgramData\Roja\Agent (CR-8). ProgramData's inherited
     # defaults let ordinary local Users read agent.yaml (install token) and
     # data\ (mTLS key + credential vault). Break inheritance and grant only
-    # SYSTEM + Administrators; DataDir is a child, so the (OI)(CI) ACEs
+    # SYSTEM + Administrators; a new DataDir is a child, so the (OI)(CI) ACEs
     # propagate to it. SIDs instead of names so localized Windows (no
     # "Administrators" group name) doesn't break the install:
     # S-1-5-18 = SYSTEM, S-1-5-32-544 = Administrators.
     & icacls $ConfigDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls failed to restrict $ConfigDir (exit $LASTEXITCODE)" }
+    # On a pre-R51 host the data dir is the legacy one, outside $ConfigDir:
+    # restrict it the same way (it was, by the old installer; this keeps it so).
+    if ($DataDir -eq $LegacyDataDir) {
+        & icacls $LegacyConfigDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls failed to restrict $LegacyConfigDir (exit $LASTEXITCODE)" }
+    }
 
-    Move-Item -Force -Path $binaryPath -Destination (Join-Path $InstallDir "aione-agent.exe")
+    Move-Item -Force -Path $binaryPath -Destination (Join-Path $InstallDir "$Agent.exe")
 
     # Write config. The install token is written directly: the agent runs
     # as a LocalSystem service and would not inherit a transient env var set
@@ -179,7 +233,7 @@ transport:
   insecure_skip_verify: false
 
 # N1-A: written unconditionally, enabled or not. The block being ABSENT
-# was the original fault — config.defaults() left SyslogConfig at its zero
+# was the original fault - config.defaults() left SyslogConfig at its zero
 # value, so there was no supported way to turn the receiver on short of
 # hand-editing this file, and setting enabled: true without udp_addr bound
 # nothing while still reporting the collector healthy.
@@ -192,8 +246,8 @@ telemetry:
     udp_addr: "0.0.0.0:514"
 
 # U-1 (2026-07-31): written unconditionally, same reasoning as the syslog
-# block above. UpdaterConfig.Enabled is NOT set in config.defaults() — only
-# Channel, Interval and RequireSigned are — so it takes Go's zero value,
+# block above. UpdaterConfig.Enabled is NOT set in config.defaults() - only
+# Channel, Interval and RequireSigned are - so it takes Go's zero value,
 # false. With the block absent, the periodic poll never runs and the console
 # Update button logs "self_update requested but updater disabled in config;
 # ignoring" and spins forever.
@@ -202,8 +256,8 @@ telemetry:
 # so channel/interval/require_signed keep stable / 6h / true.
 #
 # NOTE (Windows-specific, still open): the kardianos Windows service path
-# relies on SCM recovery actions, which — like systemd's Restart=on-failure
-# — only fire on an ABNORMAL exit. The updater exits zero deliberately, so
+# relies on SCM recovery actions, which - like systemd's Restart=on-failure
+# - only fire on an ABNORMAL exit. The updater exits zero deliberately, so
 # a Windows agent may swap its binary successfully and then stay stopped.
 # The Linux side is fixed via a systemd drop-in in install.sh; the Windows
 # equivalent (sc.exe failure/failureflag) is NOT yet wired.
@@ -221,38 +275,38 @@ log:
     # so only run '-service install' on first install (CR-8 idempotency).
     if (-not $existingSvc) {
         Write-Host ">>> Installing Windows service" -ForegroundColor Cyan
-        $env:AIONE_INSTALL_TOKEN = $Token
-        & (Join-Path $InstallDir "aione-agent.exe") `
+        $env:ROJA_INSTALL_TOKEN = $Token
+        & (Join-Path $InstallDir "$Agent.exe") `
             -service install `
             -config (Join-Path $ConfigDir "agent.yaml")
         if ($LASTEXITCODE -ne 0) { throw "-service install failed (exit $LASTEXITCODE)" }
     } else {
-        Write-Host ">>> Service already registered — skipping -service install" -ForegroundColor Cyan
+        Write-Host ">>> Service already registered - skipping -service install" -ForegroundColor Cyan
     }
 
     if (-not $NoStart) {
-        Start-Service aione-agent
+        Start-Service $Agent
         Start-Sleep -Seconds 2
-        $svc = Get-Service aione-agent -ErrorAction SilentlyContinue
+        $svc = Get-Service $Agent -ErrorAction SilentlyContinue
         if ($svc -and $svc.Status -eq "Running") {
-            Write-Host "    ✓ service started" -ForegroundColor Green
+            Write-Host "    OK: service started" -ForegroundColor Green
         } else {
-            Write-Warning "service did not reach Running state; check Windows Event Log (aione-agent source)"
+            Write-Warning "service did not reach Running state; check Windows Event Log ($Agent source)"
         }
     }
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
-    Remove-Item Env:AIONE_INSTALL_TOKEN -ErrorAction SilentlyContinue
+    Remove-Item Env:ROJA_INSTALL_TOKEN -ErrorAction SilentlyContinue
 }
 
 Write-Host ""
-Write-Host "✓ aione-agent $Version installed" -ForegroundColor Green
-Write-Host "  binary:  $InstallDir\aione-agent.exe"
+Write-Host "OK: $Agent $Version installed" -ForegroundColor Green
+Write-Host "  binary:  $InstallDir\$Agent.exe"
 Write-Host "  config:  $ConfigDir\agent.yaml"
 Write-Host "  data:    $DataDir"
 Write-Host ""
 if (-not $NoStart) {
-    Write-Host "Check the Roja chat UI — the new host should appear within 30 s."
+    Write-Host "Check the Roja chat UI - the new host should appear within 30 s."
 } else {
-    Write-Host "Service installed but NOT started. Start with: Start-Service aione-agent"
+    Write-Host "Service installed but NOT started. Start with: Start-Service $Agent"
 }
