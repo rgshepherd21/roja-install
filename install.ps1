@@ -255,12 +255,10 @@ telemetry:
 # Only `enabled` is specified: config.Load() applies YAML over defaults(),
 # so channel/interval/require_signed keep stable / 6h / true.
 #
-# NOTE (Windows-specific, still open): the kardianos Windows service path
-# relies on SCM recovery actions, which - like systemd's Restart=on-failure
-# - only fire on an ABNORMAL exit. The updater exits zero deliberately, so
-# a Windows agent may swap its binary successfully and then stay stopped.
-# The Linux side is fixed via a systemd drop-in in install.sh; the Windows
-# equivalent (sc.exe failure/failureflag) is NOT yet wired.
+# B288: a self-update restarts the Windows service through SCM recovery
+# actions. The updater exits non-zero after the binary swap, the agent sets
+# its own recovery actions at every start, and this installer applies them
+# (sc.exe failure / failureflag, below) on every run, new install or not.
 updater:
   enabled: true
 
@@ -283,6 +281,14 @@ log:
     } else {
         Write-Host ">>> Service already registered - skipping -service install" -ForegroundColor Cyan
     }
+
+    # B288: recovery actions, on every run (an existing service skipped the
+    # install above). Restart after 10 s, 10 s, then 60 s; reset after a day;
+    # also on a non-crash failure, the updater's non-zero exit.
+    & sc.exe failure $Agent reset= 86400 actions= restart/10000/restart/10000/restart/60000 | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Warning "sc.exe failure did not apply (exit $LASTEXITCODE)" }
+    & sc.exe failureflag $Agent 1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Warning "sc.exe failureflag did not apply (exit $LASTEXITCODE)" }
 
     if (-not $NoStart) {
         Start-Service $Agent
